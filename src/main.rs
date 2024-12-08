@@ -85,12 +85,16 @@ impl eframe::App for PostApp {
                     if let Some(user_did) = &state.did {
                         let text = state.post_text.clone();
                         let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
                         let token = token.clone();
                         let user_did = user_did.clone();
 
                         rt.spawn(async move {
                             if post_to_bluesky(&token, &text, &user_did).await {
                                 println!("Post successful!");
+                                // Clear the input box after a successful post
+                                let mut state = state_clone.lock().unwrap();
+                                state.post_text.clear();
                             } else {
                                 println!("Failed to post to Bluesky.");
                             }
