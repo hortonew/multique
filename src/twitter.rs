@@ -43,6 +43,61 @@ fn load_tokens() -> Option<TokenData> {
     }
 }
 
+/// Refreshes the Twitter token using the refresh token.
+pub async fn refresh_twitter_token(refresh_token: &str) -> Option<String> {
+    #[derive(Serialize)]
+    struct TokenRefreshRequest {
+        refresh_token: String,
+        grant_type: String,
+        client_id: String,
+    }
+
+    #[derive(Deserialize)]
+    struct TokenRefreshResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+    }
+
+    let client_id = env::var("TWITTER_CLIENT_ID").expect("TWITTER_CLIENT_ID not set");
+    let client = Client::new();
+    let refresh_request = TokenRefreshRequest {
+        refresh_token: refresh_token.to_string(),
+        grant_type: "refresh_token".to_string(),
+        client_id,
+    };
+
+    match client
+        .post("https://api.twitter.com/2/oauth2/token")
+        .form(&refresh_request)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(refresh_response) = response.json::<TokenRefreshResponse>().await {
+                    let new_access_token = refresh_response.access_token.clone();
+                    let new_refresh_token = refresh_response.refresh_token.clone();
+
+                    // Save the new tokens
+                    save_tokens(&new_access_token, new_refresh_token.as_deref());
+
+                    Some(new_access_token)
+                } else {
+                    println!("Failed to parse token refresh response.");
+                    None
+                }
+            } else {
+                println!("Failed to refresh Twitter token: {:?}", response.text().await);
+                None
+            }
+        }
+        Err(err) => {
+            println!("Error refreshing Twitter token: {:?}", err);
+            None
+        }
+    }
+}
+
 /// Generates the Twitter OAuth 2.0 authorization URL.
 pub async fn generate_auth_url() -> Option<String> {
     let client_id = env::var("TWITTER_CLIENT_ID").expect("TWITTER_CLIENT_ID not set");
@@ -62,10 +117,7 @@ pub async fn generate_auth_url() -> Option<String> {
 }
 
 /// Authorizes Twitter using the provided authorization code and saves the tokens.
-pub async fn authorize_twitter(
-    state: Arc<Mutex<posts::AppState>>,
-    authorization_code: &str,
-) -> Option<String> {
+pub async fn authorize_twitter(state: Arc<Mutex<posts::AppState>>, authorization_code: &str) -> Option<String> {
     #[derive(Serialize)]
     struct TokenRequest {
         code: String,
@@ -129,6 +181,31 @@ pub async fn authorize_twitter(
     }
 }
 
+pub async fn regenerate_twitter_token() -> Option<String> {
+    // Generate authorization URL and prompt user for a new code
+    if let Some(auth_url) = generate_auth_url().await {
+        println!("Visit this URL to authorize the app: {}", auth_url);
+        println!("Enter the authorization code:");
+
+        let mut input_code = String::new();
+        std::io::stdin().read_line(&mut input_code).unwrap();
+        let code = input_code.trim();
+
+        // Call authorize_twitter with the new code
+        let state = Arc::new(Mutex::new(posts::AppState::default()));
+        if let Some(new_token) = authorize_twitter(state.clone(), code).await {
+            println!("Successfully reauthorized Twitter.");
+            return Some(new_token);
+        } else {
+            println!("Failed to reauthorize Twitter.");
+        }
+    } else {
+        println!("Failed to generate authorization URL.");
+    }
+
+    None
+}
+
 pub async fn post_to_twitter(token: &str, text: &str) -> bool {
     #[derive(Serialize)]
     struct TwitterPost {
@@ -136,9 +213,7 @@ pub async fn post_to_twitter(token: &str, text: &str) -> bool {
     }
 
     let client = Client::new();
-    let post_data = TwitterPost {
-        text: text.to_string(),
-    };
+    let post_data = TwitterPost { text: text.to_string() };
 
     match client
         .post("https://api.twitter.com/2/tweets")
@@ -149,11 +224,29 @@ pub async fn post_to_twitter(token: &str, text: &str) -> bool {
     {
         Ok(response) => {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
             if status.is_success() {
                 true
+            } else if status == 401 {
+                // Attempt token refresh
+                if let Some(refresh_token) = load_tokens().and_then(|t| t.refresh_token) {
+                    println!("Twitter token expired. Attempting refresh...");
+                    if let Some(new_token) = refresh_twitter_token(&refresh_token).await {
+                        return Box::pin(post_to_twitter(&new_token, text)).await;
+                    } else {
+                        println!("Refresh token failed. Triggering reauthorization...");
+                    }
+                }
+
+                // Trigger reauthorization if refresh fails
+                println!("Reauthorizing Twitter...");
+                if let Some(new_token) = regenerate_twitter_token().await {
+                    return Box::pin(post_to_twitter(&new_token, text)).await;
+                }
+
+                println!("Failed to refresh or regenerate Twitter token.");
+                false
             } else {
-                println!("Failed to post to Twitter: {}", body);
+                println!("Failed to post to Twitter: {:?}", response.text().await);
                 false
             }
         }
