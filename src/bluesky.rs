@@ -74,74 +74,81 @@ pub async fn refresh_access_token(refresh_jwt: &str) -> Option<String> {
 }
 
 pub async fn authorize_bluesky(state: Arc<Mutex<posts::AppState>>) -> Option<String> {
-    #[derive(Serialize)]
-    struct BlueskyAuthRequest {
-        identifier: String,
-        password: String,
-    }
-
-    #[derive(Deserialize, Debug, Clone)]
-    #[serde(rename_all = "camelCase")]
-    struct BlueskyAuthResponse {
-        access_jwt: String,
-        refresh_jwt: String,
-        handle: String,
-        email: String,
-        did: String,
-    }
-
     let client = Client::new();
-    let auth_data = BlueskyAuthRequest {
-        identifier: env::var("BLUESKY_USERNAME").unwrap_or_else(|_| "invalid_username".to_string()),
-        password: env::var("BLUESKY_PASSWORD").unwrap_or_else(|_| "invalid_password".to_string()),
-    };
+    let auth_data = create_auth_request();
 
-    match client
-        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
-        .json(&auth_data)
-        .send()
-        .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            // println!("Response Status: {}", status);
-            // println!("Response Body: {}", body);
-
-            if status.is_success() {
-                match serde_json::from_str::<BlueskyAuthResponse>(&body) {
-                    Ok(auth_response) => {
-                        println!("Successfully authenticated as {}", auth_response.handle);
-
-                        // Clone required values to avoid borrowing issues
-                        let token = auth_response.access_jwt.clone();
-                        let refresh_token = auth_response.refresh_jwt.clone();
-                        let did = auth_response.did.clone();
-
-                        // Update the AppState
-                        let mut state = state.lock().await;
-                        state.bluesky_token = Some(token.clone());
-                        state.did = Some(did.clone());
-
-                        // Save tokens locally
-                        save_tokens(&token, &refresh_token, &did);
-
-                        Some(token)
-                    }
-                    Err(err) => {
-                        println!("Deserialization error: {:?}", err);
-                        None
-                    }
-                }
-            } else {
-                println!("Authentication failed: {}", body);
-                None
-            }
-        }
+    match send_auth_request(&client, &auth_data).await {
+        Ok(response) => handle_auth_response(response, state).await,
         Err(err) => {
             println!("Error sending request: {:?}", err);
             None
         }
+    }
+}
+
+#[derive(Serialize)]
+struct BlueskyAuthRequest {
+    identifier: String,
+    password: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BlueskyAuthResponse {
+    access_jwt: String,
+    refresh_jwt: String,
+    handle: String,
+    email: String,
+    did: String,
+}
+
+fn create_auth_request() -> BlueskyAuthRequest {
+    BlueskyAuthRequest {
+        identifier: env::var("BLUESKY_USERNAME").unwrap_or_else(|_| "invalid_username".to_string()),
+        password: env::var("BLUESKY_PASSWORD").unwrap_or_else(|_| "invalid_password".to_string()),
+    }
+}
+
+async fn send_auth_request(
+    client: &Client,
+    auth_data: &BlueskyAuthRequest,
+) -> Result<reqwest::Response, reqwest::Error> {
+    client
+        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
+        .json(auth_data)
+        .send()
+        .await
+}
+
+async fn handle_auth_response(response: reqwest::Response, state: Arc<Mutex<posts::AppState>>) -> Option<String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if status.is_success() {
+        match serde_json::from_str::<BlueskyAuthResponse>(&body) {
+            Ok(auth_response) => {
+                println!("Successfully authenticated as {}", auth_response.handle);
+
+                let token = auth_response.access_jwt.clone();
+                let refresh_token = auth_response.refresh_jwt.clone();
+                let did = auth_response.did.clone();
+
+                let mut state = state.lock().await;
+                state.bluesky_token = Some(token.clone());
+                state.did = Some(did.clone());
+
+                save_tokens(&token, &refresh_token, &did);
+
+                Some(token)
+            }
+            Err(err) => {
+                println!("Deserialization error: {:?}", err);
+                None
+            }
+        }
+    } else {
+        println!("Authentication failed: {}", body);
+        None
     }
 }
 
