@@ -1,66 +1,52 @@
+# Multique
 
+A social media management tool, enabling you to post the same message to multiple platforms.
 
-## Implement a new app in main.rs
+![Multique](images/multique.png)
 
-Load token
+## Platforms implemented
 
-```rust
-mod new;
+- Twitter / X
+- Bluesky
+- Mastodon (Fosstodon)
 
-// make sure new_authorized gets added to posts.rs
+## Platforms in progress
 
-// Load new tokens
-if let Some(_new_token) = new::load_bearer_token() {
-    let mut state_guard = futures::executor::block_on(state.lock());
-    state_guard.new_authorized = true;
-}
+- LinkedIn
+- Threads
+
+## Platforms targetted, but unsupported
+
+- Cara (Artists)
+
+## Configuration
+
+Create a `.env` file in the root of the project.  It should contain:
+
+```sh
+# Bluesky
+BLUESKY_USERNAME=youremail
+BLUESKY_PASSWORD=yourpassword
+
+# Twitter
+# https://developer.twitter.com/en/portal/dashboard -> Default project -> App settings -> Keys and tokens
+# User authentication settings -> Read and write + Native App + http://localhost/callback callback + https://github.com/<your username> for website URL
+TWITTER_CLIENT_ID=
+TWITTER_CLIENT_SECRET=
+TWITTER_REDIRECT_URI=http://localhost/callback
+
+# Mastodon
+# Preferences -> Development -> New Application.  Scopes: read, write:statuses
+MASTODON_CLIENT_ID=yourclientid
+MASTODON_CLIENT_SECRET=yourclientsecret
 ```
 
-Add to UI
+## Usage
 
-```rust
-// new Authorization UI
-ui.horizontal(|ui| {
-    ui.label("New:");
-    let state = futures::executor::block_on(state_clone.lock());
-    if state.new_authorized {
-        ui.label("Authorized ✅");
-    } else if ui.button("Authorize").clicked() {
-        let rt = Arc::clone(&self.rt);
-        let state_clone = Arc::clone(&self.state);
-        rt.spawn(async move {
-            if let Some(auth_url) = new::generate_auth_url().await {
-                println!("Authorize your app at: {}", auth_url);
+This is still in development, so it has a few rough edges.  Authentication is handled on the CLI.
 
-                println!("Enter the authorization code:");
-                let mut input_code = String::new();
-                std::io::stdin().read_line(&mut input_code).unwrap();
-                let code = input_code.trim().to_string();
-
-                if new::authorize_new(state_clone.clone(), &code)
-                    .await
-                    .is_some()
-                {
-                    let mut state = state_clone.lock().await;
-                    state.new_authorized = true;
-                }
-            }
-        });
-    }
-});
+```sh
+cargo run
 ```
 
-Post if authorized
-
-```rust
-// Post to new if authorized
-if state.new_authorized {
-    if let Some(new_token) = new::load_bearer_token() {
-        if new::post_to_new(&new_token, &text).await {
-            println!("Posted to new successfully!");
-        } else {
-            println!("Failed to post to new.");
-        }
-    }
-}
-```
+Follow the instructions to authorize an app.  For Mastodon and Twitter, you will need to visit the URL provided, authorize the app, and provide a code back to the CLI.  For twitter, you'll copy this code from the URL you're redirected to, whereas Mastodon will appear in the website.
