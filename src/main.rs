@@ -5,6 +5,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 mod bluesky;
+mod linkedin;
+mod mastodon;
 mod posts;
 mod twitter;
 
@@ -31,6 +33,18 @@ impl PostApp {
             state_guard.twitter_authorized = true;
         }
 
+        // Load LinkedIn tokens
+        if let Some(_linkedin_token) = linkedin::load_bearer_token() {
+            let mut state_guard = futures::executor::block_on(state.lock());
+            state_guard.linkedin_authorized = true;
+        }
+
+        // Load Mastodon Access Token
+        if let Some(token_data) = mastodon::load_tokens() {
+            let mut state_guard = futures::executor::block_on(state.lock());
+            state_guard.mastodon_authorized = true;
+        }
+
         Self {
             state,
             rt: Arc::new(Runtime::new().unwrap()),
@@ -43,11 +57,11 @@ impl eframe::App for PostApp {
         let state_clone = Arc::clone(&self.state);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Multi-Platform Poster");
+            ui.heading("Multique");
 
             // Twitter Authorization UI
             ui.horizontal(|ui| {
-                ui.label("Twitter:");
+                ui.label("Twitter / X:");
                 let state = futures::executor::block_on(state_clone.lock());
                 if state.twitter_authorized {
                     ui.label("Authorized ✅");
@@ -63,10 +77,7 @@ impl eframe::App for PostApp {
                             std::io::stdin().read_line(&mut input_code).unwrap();
                             let code = input_code.trim().to_string();
 
-                            if twitter::authorize_twitter(state_clone.clone(), &code)
-                                .await
-                                .is_some()
-                            {
+                            if twitter::authorize_twitter(state_clone.clone(), &code).await.is_some() {
                                 let mut state = state_clone.lock().await;
                                 state.twitter_authorized = true;
                             }
@@ -85,12 +96,70 @@ impl eframe::App for PostApp {
                     let rt = Arc::clone(&self.rt);
                     let state_clone = Arc::clone(&self.state);
                     rt.spawn(async move {
-                        if bluesky::authorize_bluesky(state_clone.clone())
-                            .await
-                            .is_some()
-                        {
+                        if bluesky::authorize_bluesky(state_clone.clone()).await.is_some() {
                             let mut state = state_clone.lock().await;
                             state.bluesky_authorized = true;
+                        }
+                    });
+                }
+            });
+
+            // LinkedIn Authorization UI
+            ui.horizontal(|ui| {
+                ui.label("LinkedIn:");
+                let state = futures::executor::block_on(state_clone.lock());
+                if state.linkedin_authorized {
+                    ui.label("Authorized ✅");
+                } else if ui.button("Authorize").clicked() {
+                    let rt = Arc::clone(&self.rt);
+                    let state_clone = Arc::clone(&self.state);
+                    rt.spawn(async move {
+                        if let Some(auth_url) = linkedin::generate_auth_url().await {
+                            println!("Authorize your app at: {}", auth_url);
+
+                            println!("Enter the authorization code:");
+                            let mut input_code = String::new();
+                            std::io::stdin().read_line(&mut input_code).unwrap();
+                            let code = input_code.trim().to_string();
+
+                            if linkedin::authorize_linkedin(state_clone.clone(), &code).await.is_some() {
+                                let mut state = state_clone.lock().await;
+                                state.linkedin_authorized = true;
+                            }
+                        }
+                    });
+                }
+            });
+
+            // Mastodon Authorization UI
+            ui.horizontal(|ui| {
+                ui.label("Mastodon:");
+                let state = futures::executor::block_on(state_clone.lock());
+                if state.mastodon_authorized {
+                    ui.label("Authorized ✅");
+                } else if ui.button("Authorize").clicked() {
+                    let rt = Arc::clone(&self.rt);
+                    let state_clone = Arc::clone(&self.state);
+                    rt.spawn(async move {
+                        let client_id =
+                            std::env::var("MASTODON_CLIENT_ID").expect("MASTODON_CLIENT_ID not set in .env");
+                        let client_secret =
+                            std::env::var("MASTODON_CLIENT_SECRET").expect("MASTODON_CLIENT_SECRET not set in .env");
+
+                        let authorization_url = mastodon::generate_auth_url(&client_id).await;
+                        println!("Authorize your app at: {}", authorization_url);
+
+                        println!("Enter the authorization code:");
+                        let mut input_code = String::new();
+                        std::io::stdin().read_line(&mut input_code).unwrap();
+                        let code = input_code.trim().to_string();
+
+                        if let Some(access_token) =
+                            mastodon::authorize_mastodon(&client_id, &client_secret, &code).await
+                        {
+                            mastodon::save_tokens(&access_token);
+                            let mut state = state_clone.lock().await;
+                            state.mastodon_authorized = true;
                         }
                     });
                 }
@@ -139,6 +208,28 @@ impl eframe::App for PostApp {
                         }
                     }
 
+                    // Post to LinkedIn if authorized
+                    if state.linkedin_authorized {
+                        if let Some(linkedin_token) = linkedin::load_bearer_token() {
+                            if linkedin::post_to_linkedin(&linkedin_token, &text).await {
+                                println!("Posted to LinkedIn successfully!");
+                            } else {
+                                println!("Failed to post to LinkedIn.");
+                            }
+                        }
+                    }
+
+                    // Post to Mastodon if authorized
+                    if state.mastodon_authorized {
+                        if let Some(token_data) = mastodon::load_tokens() {
+                            if mastodon::post_to_mastodon(&token_data.access_token, &text).await {
+                                println!("Posted to Mastodon successfully!");
+                            } else {
+                                println!("Failed to post to Mastodon.");
+                            }
+                        }
+                    }
+
                     // Clear the input box after posting
                     state.post_text.clear();
                 });
@@ -150,9 +241,5 @@ impl eframe::App for PostApp {
 fn main() -> Result<(), eframe::Error> {
     dotenv().ok();
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
-        "Multi-Platform Poster",
-        options,
-        Box::new(|_cc| Ok(Box::new(PostApp::new()))),
-    )
+    eframe::run_native("Multique", options, Box::new(|_cc| Ok(Box::new(PostApp::new()))))
 }

@@ -2,3 +2,4 @@
 .env
 bluesky_tokens.json
 twitter_tokens.json
+mastodon_tokens.json
