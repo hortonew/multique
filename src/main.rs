@@ -86,22 +86,72 @@ impl PostApp {
 
 impl eframe::App for PostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let available_width = ctx.available_rect().width();
+        let main_section_width = available_width * 0.6;
+        let side_panel_width = available_width * 0.4;
         let state_clone = Arc::clone(&self.state);
+        egui::SidePanel::right("note_panel").exact_width(side_panel_width).show(ctx, |ui| {
+            ui.heading(egui::RichText::new("📝 Instructions").color(egui::Color32::GREEN));
+            ui.label("1. Authorize the platforms you want to use.\n2. Check the boxes for the platforms you want to post to.\n3. Write your message and click 'Post.'\n\nKeep posts to under 5 every 15 minutes to avoid rate limiting.");
+
+            ui.add_space(20.0);
+
+            ui.heading(
+                egui::RichText::new("📋 It will post to:")
+                    .color(egui::Color32::GREEN),
+            );
+            let state = futures::executor::block_on(state_clone.lock());
+
+            for (platform, checked) in &self.platform_checkboxes {
+                let is_authorized = match *platform {
+                    "Twitter" => state.twitter_authorized,
+                    "Bluesky" => state.bluesky_authorized,
+                    "Mastodon" => state.mastodon_authorized,
+                    "LinkedIn" => state.linkedin_authorized,
+                    _ => false,
+                };
+
+                if *checked && is_authorized {
+                    ui.label(format!("- {}", platform));
+                }
+            }
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.set_min_width(main_section_width);
             ui.heading("🌟 Multique - Post to all the platforms!");
 
+            ui.add_space(20.0);
             // Platform Selection Section
             ui.group(|ui| {
+                ui.set_min_width(400.0);
                 ui.label("Platforms:");
 
-                // Render checkboxes and authorization status for each platform
                 render_platform_checkbox(
                     ui,
                     "🐦 Twitter / X:",
                     "Twitter",
                     &mut self.platform_checkboxes,
                     |state| state.twitter_authorized,
+                    || {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if let Some(auth_url) = twitter::generate_auth_url().await {
+                                println!("Authorize your app at: {}", auth_url);
+
+                                println!("Enter the authorization code:");
+                                let mut input_code = String::new();
+                                std::io::stdin().read_line(&mut input_code).unwrap();
+                                let code = input_code.trim().to_string();
+
+                                if twitter::authorize_twitter(state_clone.clone(), &code).await.is_some() {
+                                    let mut state = state_clone.lock().await;
+                                    state.twitter_authorized = true;
+                                }
+                            }
+                        });
+                    },
                     state_clone.clone(),
                 );
 
@@ -111,6 +161,16 @@ impl eframe::App for PostApp {
                     "Bluesky",
                     &mut self.platform_checkboxes,
                     |state| state.bluesky_authorized,
+                    || {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if bluesky::authorize_bluesky(state_clone.clone()).await.is_some() {
+                                let mut state = state_clone.lock().await;
+                                state.bluesky_authorized = true;
+                            }
+                        });
+                    },
                     state_clone.clone(),
                 );
 
@@ -120,6 +180,32 @@ impl eframe::App for PostApp {
                     "Mastodon",
                     &mut self.platform_checkboxes,
                     |state| state.mastodon_authorized,
+                    || {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            let client_id =
+                                std::env::var("MASTODON_CLIENT_ID").expect("MASTODON_CLIENT_ID not set in .env");
+                            let client_secret = std::env::var("MASTODON_CLIENT_SECRET")
+                                .expect("MASTODON_CLIENT_SECRET not set in .env");
+
+                            let authorization_url = mastodon::generate_auth_url(&client_id).await;
+                            println!("Authorize your app at: {}", authorization_url);
+
+                            println!("Enter the authorization code:");
+                            let mut input_code = String::new();
+                            std::io::stdin().read_line(&mut input_code).unwrap();
+                            let code = input_code.trim().to_string();
+
+                            if let Some(access_token) =
+                                mastodon::authorize_mastodon(&client_id, &client_secret, &code).await
+                            {
+                                mastodon::save_tokens(&access_token);
+                                let mut state = state_clone.lock().await;
+                                state.mastodon_authorized = true;
+                            }
+                        });
+                    },
                     state_clone.clone(),
                 );
 
@@ -129,14 +215,34 @@ impl eframe::App for PostApp {
                     "LinkedIn",
                     &mut self.platform_checkboxes,
                     |state| state.linkedin_authorized,
+                    || {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if let Some(auth_url) = linkedin::generate_auth_url().await {
+                                println!("Authorize your app at: {}", auth_url);
+
+                                println!("Enter the authorization code:");
+                                let mut input_code = String::new();
+                                std::io::stdin().read_line(&mut input_code).unwrap();
+                                let code = input_code.trim().to_string();
+
+                                if linkedin::authorize_linkedin(state_clone.clone(), &code).await.is_some() {
+                                    let mut state = state_clone.lock().await;
+                                    state.linkedin_authorized = true;
+                                }
+                            }
+                        });
+                    },
                     state_clone.clone(),
                 );
             });
 
-            ui.separator();
+            ui.add_space(20.0);
 
             // Compose and Post Section
             ui.group(|ui| {
+                ui.set_min_width(400.0);
                 ui.label("Compose your message:");
                 {
                     let mut state = futures::executor::block_on(state_clone.lock());
@@ -207,15 +313,17 @@ impl eframe::App for PostApp {
 }
 
 /// Helper function to render a platform's checkbox and authorization status
-fn render_platform_checkbox<F>(
+fn render_platform_checkbox<F, G>(
     ui: &mut egui::Ui,
     label: &str,
     platform_key: &'static str,
     platform_checkboxes: &mut HashMap<&'static str, bool>,
     is_authorized: F,
+    authorize_action: G,
     state_clone: Arc<Mutex<posts::AppState>>,
 ) where
     F: FnOnce(&posts::AppState) -> bool,
+    G: FnOnce(),
 {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -230,6 +338,10 @@ fn render_platform_checkbox<F>(
             }
         } else {
             ui.colored_label(egui::Color32::RED, "Not Authorized ❌");
+            // Show the "Authorize" button for unauthorized platforms
+            if ui.button("Authorize").clicked() {
+                authorize_action();
+            }
         }
     });
 }
