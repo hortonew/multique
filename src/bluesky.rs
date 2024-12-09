@@ -35,7 +35,7 @@ pub fn load_tokens() -> Option<TokenData> {
     }
 }
 
-pub async fn refresh_access_token(refresh_jwt: &str) -> Option<String> {
+pub async fn refresh_access_token(refresh_jwt: &str) -> Option<TokenData> {
     #[derive(Serialize)]
     struct RefreshRequest {
         refreshJwt: String,
@@ -44,6 +44,8 @@ pub async fn refresh_access_token(refresh_jwt: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct RefreshResponse {
         accessJwt: String,
+        refreshJwt: String,
+        did: String,
     }
 
     let client = Client::new();
@@ -60,9 +62,18 @@ pub async fn refresh_access_token(refresh_jwt: &str) -> Option<String> {
         Ok(response) => {
             if response.status().is_success() {
                 let refresh_response: RefreshResponse = response.json().await.ok()?;
-                Some(refresh_response.accessJwt)
+                save_tokens(
+                    &refresh_response.accessJwt,
+                    &refresh_response.refreshJwt,
+                    &refresh_response.did,
+                );
+                Some(TokenData {
+                    access_jwt: refresh_response.accessJwt,
+                    refresh_jwt: refresh_response.refreshJwt,
+                    did: refresh_response.did,
+                })
             } else {
-                println!("Failed to refresh access token");
+                println!("Failed to refresh access token: {:?}", response.text().await);
                 None
             }
         }
@@ -73,82 +84,81 @@ pub async fn refresh_access_token(refresh_jwt: &str) -> Option<String> {
     }
 }
 
-pub async fn authorize_bluesky(state: Arc<Mutex<posts::AppState>>) -> Option<String> {
+pub async fn authorize_bluesky(state: Arc<Mutex<posts::AppState>>) -> Option<TokenData> {
     let client = Client::new();
     let auth_data = create_auth_request();
 
     match send_auth_request(&client, &auth_data).await {
-        Ok(response) => handle_auth_response(response, state).await,
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(auth_response) = response.json::<BlueskyAuthResponse>().await {
+                    save_tokens(
+                        &auth_response.access_jwt,
+                        &auth_response.refresh_jwt,
+                        &auth_response.did,
+                    );
+
+                    // Update app state with new tokens
+                    {
+                        let mut state = state.lock().await;
+                        state.bluesky_token = Some(auth_response.access_jwt.clone());
+                        state.did = Some(auth_response.did.clone());
+                        state.bluesky_authorized = true;
+                    }
+
+                    Some(TokenData {
+                        access_jwt: auth_response.access_jwt,
+                        refresh_jwt: auth_response.refresh_jwt,
+                        did: auth_response.did,
+                    })
+                } else {
+                    println!("Failed to parse authorization response.");
+                    None
+                }
+            } else {
+                println!("Authorization failed: {:?}", response.text().await);
+                None
+            }
+        }
         Err(err) => {
-            println!("Error sending request: {:?}", err);
+            println!("Error during authorization: {:?}", err);
             None
         }
     }
 }
 
-#[derive(Serialize)]
-struct BlueskyAuthRequest {
-    identifier: String,
-    password: String,
-}
+pub async fn reauthorize_bluesky() -> Option<TokenData> {
+    let client = Client::new();
+    let auth_data = create_auth_request();
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct BlueskyAuthResponse {
-    access_jwt: String,
-    refresh_jwt: String,
-    handle: String,
-    email: String,
-    did: String,
-}
+    match send_auth_request(&client, &auth_data).await {
+        Ok(response) => {
+            if response.status().is_success() {
+                if let Ok(auth_response) = response.json::<BlueskyAuthResponse>().await {
+                    save_tokens(
+                        &auth_response.access_jwt,
+                        &auth_response.refresh_jwt,
+                        &auth_response.did,
+                    );
 
-fn create_auth_request() -> BlueskyAuthRequest {
-    BlueskyAuthRequest {
-        identifier: env::var("BLUESKY_USERNAME").unwrap_or_else(|_| "invalid_username".to_string()),
-        password: env::var("BLUESKY_PASSWORD").unwrap_or_else(|_| "invalid_password".to_string()),
-    }
-}
-
-async fn send_auth_request(
-    client: &Client,
-    auth_data: &BlueskyAuthRequest,
-) -> Result<reqwest::Response, reqwest::Error> {
-    client
-        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
-        .json(auth_data)
-        .send()
-        .await
-}
-
-async fn handle_auth_response(response: reqwest::Response, state: Arc<Mutex<posts::AppState>>) -> Option<String> {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-
-    if status.is_success() {
-        match serde_json::from_str::<BlueskyAuthResponse>(&body) {
-            Ok(auth_response) => {
-                println!("Successfully authenticated as {}", auth_response.handle);
-
-                let token = auth_response.access_jwt.clone();
-                let refresh_token = auth_response.refresh_jwt.clone();
-                let did = auth_response.did.clone();
-
-                let mut state = state.lock().await;
-                state.bluesky_token = Some(token.clone());
-                state.did = Some(did.clone());
-
-                save_tokens(&token, &refresh_token, &did);
-
-                Some(token)
-            }
-            Err(err) => {
-                println!("Deserialization error: {:?}", err);
+                    Some(TokenData {
+                        access_jwt: auth_response.access_jwt,
+                        refresh_jwt: auth_response.refresh_jwt,
+                        did: auth_response.did,
+                    })
+                } else {
+                    println!("Failed to parse reauthorization response.");
+                    None
+                }
+            } else {
+                println!("Reauthorization failed: {:?}", response.text().await);
                 None
             }
         }
-    } else {
-        println!("Authentication failed: {}", body);
-        None
+        Err(err) => {
+            println!("Error during reauthorization: {:?}", err);
+            None
+        }
     }
 }
 
@@ -172,40 +182,98 @@ pub async fn post_to_bluesky(token: &str, text: &str, user_did: &str) -> bool {
     }
 
     let client = Client::new();
+    let mut current_token = token.to_string();
 
-    let post_data = BlueskyPost {
-        repo: user_did.to_string(),
-        collection: "app.bsky.feed.post".to_string(),
-        r#type: "app.bsky.feed.post".to_string(),
-        record: Record {
-            text: text.to_string(),
-            created_at: Utc::now().to_rfc3339(), // Generate the current timestamp in ISO 8601 format
-        },
-    };
+    for _ in 0..2 {
+        // Allow up to two attempts: one for token refresh and another for reauthorization.
+        let post_data = BlueskyPost {
+            repo: user_did.to_string(),
+            collection: "app.bsky.feed.post".to_string(),
+            r#type: "app.bsky.feed.post".to_string(),
+            record: Record {
+                text: text.to_string(),
+                created_at: Utc::now().to_rfc3339(), // Generate the current timestamp in ISO 8601 format
+            },
+        };
 
-    match client
-        .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
-        .bearer_auth(token)
-        .json(&post_data)
-        .send()
-        .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            // println!("Post Response Status: {}", status);
-            // println!("Post Response Body: {}", body);
+        match client
+            .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
+            .bearer_auth(&current_token)
+            .json(&post_data)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return true; // Post succeeded
+                } else if response.status() == 401 {
+                    println!("Bluesky token expired. Attempting to refresh or reauthorize...");
 
-            if status.is_success() {
-                true
-            } else {
-                println!("Post failed: {}", body);
-                false
+                    // Try refreshing the token
+                    if let Some(tokens) = load_tokens() {
+                        if let Some(new_tokens) = refresh_access_token(&tokens.refresh_jwt).await {
+                            current_token = new_tokens.access_jwt;
+                            continue; // Retry with the refreshed token
+                        } else {
+                            println!("Refresh failed. Attempting reauthorization...");
+                            // If refresh fails, attempt reauthorization
+                            if let Some(new_tokens) = reauthorize_bluesky().await {
+                                current_token = new_tokens.access_jwt;
+                                continue; // Retry with the new token
+                            }
+                        }
+                    }
+
+                    println!("Failed to refresh or reauthorize token for Bluesky.");
+                    return false;
+                } else {
+                    println!(
+                        "Post failed with status {}: {:?}",
+                        response.status(),
+                        response.text().await
+                    );
+                    return false;
+                }
+            }
+            Err(err) => {
+                println!("Error posting to Bluesky: {:?}", err);
+                return false;
             }
         }
-        Err(err) => {
-            println!("Error posting to Bluesky: {:?}", err);
-            false
-        }
     }
+
+    println!("All attempts to post to Bluesky failed.");
+    false
+}
+
+fn create_auth_request() -> BlueskyAuthRequest {
+    BlueskyAuthRequest {
+        identifier: env::var("BLUESKY_USERNAME").unwrap_or_else(|_| "invalid_username".to_string()),
+        password: env::var("BLUESKY_PASSWORD").unwrap_or_else(|_| "invalid_password".to_string()),
+    }
+}
+
+async fn send_auth_request(
+    client: &Client,
+    auth_data: &BlueskyAuthRequest,
+) -> Result<reqwest::Response, reqwest::Error> {
+    client
+        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
+        .json(auth_data)
+        .send()
+        .await
+}
+
+#[derive(Serialize)]
+struct BlueskyAuthRequest {
+    identifier: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlueskyAuthResponse {
+    access_jwt: String,
+    refresh_jwt: String,
+    did: String,
 }

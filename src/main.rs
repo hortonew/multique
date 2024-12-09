@@ -18,37 +18,56 @@ struct PostApp {
 impl PostApp {
     fn new() -> Self {
         let state = Arc::new(Mutex::new(posts::AppState::default()));
+        let rt = Arc::new(Runtime::new().unwrap());
 
-        // Load Bluesky tokens from storage
+        // Load Bluesky tokens and validate
         if let Some(tokens) = bluesky::load_tokens() {
             let mut state_guard = futures::executor::block_on(state.lock());
-            state_guard.bluesky_token = Some(tokens.access_jwt);
-            state_guard.did = Some(tokens.did);
-            state_guard.bluesky_authorized = true; // Mark Bluesky as authorized
+            state_guard.bluesky_token = Some(tokens.access_jwt.clone());
+            state_guard.did = Some(tokens.did.clone());
+            state_guard.bluesky_authorized = true; // Assume authorized for now
+
+            // Validate and refresh token asynchronously
+            let state_clone = Arc::clone(&state);
+            rt.spawn(async move {
+                if let Some(new_tokens) = bluesky::refresh_access_token(&tokens.refresh_jwt).await {
+                    let mut state = state_clone.lock().await;
+                    state.bluesky_token = Some(new_tokens.access_jwt);
+                    state.did = Some(new_tokens.did);
+                    println!("Bluesky token refreshed successfully.");
+                } else {
+                    println!("Bluesky token refresh failed. Attempting reauthorization...");
+                    if let Some(new_tokens) = bluesky::reauthorize_bluesky().await {
+                        let mut state = state_clone.lock().await;
+                        state.bluesky_token = Some(new_tokens.access_jwt);
+                        state.did = Some(new_tokens.did);
+                        println!("Bluesky reauthorized successfully.");
+                    } else {
+                        let mut state = state_clone.lock().await;
+                        state.bluesky_authorized = false;
+                        println!("Failed to refresh or reauthorize Bluesky.");
+                    }
+                }
+            });
         }
 
-        // Load Bearer Token for Twitter
+        // Load tokens for other platforms
         if twitter::load_bearer_token().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.twitter_authorized = true;
         }
 
-        // Load LinkedIn tokens
         if linkedin::load_bearer_token().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.linkedin_authorized = true;
         }
 
-        // Load Mastodon Access Token
         if mastodon::load_tokens().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.mastodon_authorized = true;
         }
 
-        Self {
-            state,
-            rt: Arc::new(Runtime::new().unwrap()),
-        }
+        Self { state, rt }
     }
 }
 
@@ -202,13 +221,59 @@ impl eframe::App for PostApp {
                             }
                         }
 
-                        // Post to Bluesky
-                        if let Some(token) = &state.bluesky_token {
-                            if let Some(user_did) = &state.did {
-                                if bluesky::post_to_bluesky(token, &text, user_did).await {
-                                    println!("Posted to Bluesky successfully!");
-                                } else {
-                                    println!("Failed to post to Bluesky.");
+                        // Post to Bluesky with retries for refresh/reauthorization
+                        if state.bluesky_authorized {
+                            if let Some(token) = state.bluesky_token.clone() {
+                                if let Some(user_did) = state.did.clone() {
+                                    if bluesky::post_to_bluesky(&token, &text, &user_did).await {
+                                        println!("Posted to Bluesky successfully!");
+                                    } else {
+                                        println!("Initial Bluesky post failed. Attempting token refresh...");
+                                        if let Some(tokens) = bluesky::load_tokens() {
+                                            if let Some(new_tokens) =
+                                                bluesky::refresh_access_token(&tokens.refresh_jwt).await
+                                            {
+                                                state.bluesky_token = Some(new_tokens.access_jwt.clone());
+                                                if bluesky::post_to_bluesky(
+                                                    &new_tokens.access_jwt,
+                                                    &text,
+                                                    &new_tokens.did,
+                                                )
+                                                .await
+                                                {
+                                                    println!("Posted to Bluesky successfully after refresh!");
+                                                } else {
+                                                    println!(
+                                                        "Bluesky post failed after token refresh. Attempting reauthorization..."
+                                                    );
+                                                    if let Some(new_tokens) =
+                                                        bluesky::reauthorize_bluesky().await
+                                                    {
+                                                        state.bluesky_token =
+                                                            Some(new_tokens.access_jwt.clone());
+                                                        state.did = Some(new_tokens.did.clone());
+                                                        if bluesky::post_to_bluesky(
+                                                            &new_tokens.access_jwt,
+                                                            &text,
+                                                            &new_tokens.did,
+                                                        )
+                                                        .await
+                                                        {
+                                                            println!(
+                                                                "Posted to Bluesky successfully after reauthorization!"
+                                                            );
+                                                        } else {
+                                                            println!(
+                                                                "Failed to post to Bluesky after reauthorization."
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                println!("Failed to refresh or reauthorize Bluesky.");
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

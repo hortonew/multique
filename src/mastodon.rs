@@ -114,10 +114,9 @@ pub async fn post_to_mastodon(token: &str, status: &str) -> bool {
             let status_code = response.status();
             let body = response.text().await.unwrap_or_default();
             if status_code.is_success() {
-                println!("Posted to Mastodon successfully!");
                 true
             } else {
-                println!("Failed to post to Mastodon: {}", body);
+                println!("Failure in post_to_mastodon: {}", body);
                 false
             }
         }
