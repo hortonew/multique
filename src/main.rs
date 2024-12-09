@@ -6,10 +6,7 @@ use tokio::sync::Mutex;
 
 mod bluesky;
 mod posts;
-
-fn is_token_valid(token: &str) -> bool {
-    !token.is_empty()
-}
+mod twitter;
 
 struct PostApp {
     state: Arc<Mutex<posts::AppState>>,
@@ -20,12 +17,18 @@ impl PostApp {
     fn new() -> Self {
         let state = Arc::new(Mutex::new(posts::AppState::default()));
 
-        // Load tokens from storage
+        // Load Bluesky tokens from storage
         if let Some(tokens) = bluesky::load_tokens() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.bluesky_token = Some(tokens.access_jwt);
             state_guard.did = Some(tokens.did);
             state_guard.bluesky_authorized = true; // Mark Bluesky as authorized
+        }
+
+        // Load Bearer Token for Twitter
+        if let Some(_bearer_token) = twitter::load_bearer_token() {
+            let mut state_guard = futures::executor::block_on(state.lock());
+            state_guard.twitter_authorized = true;
         }
 
         Self {
@@ -45,45 +48,49 @@ impl eframe::App for PostApp {
             // Twitter Authorization UI
             ui.horizontal(|ui| {
                 ui.label("Twitter:");
-                let mut state = futures::executor::block_on(state_clone.lock());
+                let state = futures::executor::block_on(state_clone.lock());
                 if state.twitter_authorized {
                     ui.label("Authorized ✅");
                 } else if ui.button("Authorize").clicked() {
-                    state.twitter_authorized = true;
-                }
-            });
+                    let rt = Arc::clone(&self.rt);
+                    let state_clone = Arc::clone(&self.state);
+                    rt.spawn(async move {
+                        if let Some(auth_url) = twitter::generate_auth_url().await {
+                            println!("Authorize your app at: {}", auth_url);
 
-            // Mastodon Authorization UI
-            ui.horizontal(|ui| {
-                ui.label("Mastodon:");
-                let mut state = futures::executor::block_on(state_clone.lock());
-                if state.mastodon_authorized {
-                    ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    state.mastodon_authorized = true;
+                            println!("Enter the authorization code:");
+                            let mut input_code = String::new();
+                            std::io::stdin().read_line(&mut input_code).unwrap();
+                            let code = input_code.trim().to_string();
+
+                            if twitter::authorize_twitter(state_clone.clone(), &code)
+                                .await
+                                .is_some()
+                            {
+                                let mut state = state_clone.lock().await;
+                                state.twitter_authorized = true;
+                            }
+                        }
+                    });
                 }
             });
 
             // Bluesky Authorization UI
             ui.horizontal(|ui| {
                 ui.label("Bluesky:");
-                let mut state = futures::executor::block_on(state_clone.lock());
+                let state = futures::executor::block_on(state_clone.lock());
                 if state.bluesky_authorized {
                     ui.label("Authorized ✅");
-                } else {
-                    ui.add_enabled_ui(!state.bluesky_authorized, |ui| {
-                        if ui.button("Authorize").clicked() {
-                            let rt = Arc::clone(&self.rt);
-                            let state_clone = Arc::clone(&self.state);
-                            rt.spawn(async move {
-                                if bluesky::authorize_bluesky(state_clone.clone())
-                                    .await
-                                    .is_some()
-                                {
-                                    let mut state = state_clone.lock().await;
-                                    state.bluesky_authorized = true;
-                                }
-                            });
+                } else if ui.button("Authorize").clicked() {
+                    let rt = Arc::clone(&self.rt);
+                    let state_clone = Arc::clone(&self.state);
+                    rt.spawn(async move {
+                        if bluesky::authorize_bluesky(state_clone.clone())
+                            .await
+                            .is_some()
+                        {
+                            let mut state = state_clone.lock().await;
+                            state.bluesky_authorized = true;
                         }
                     });
                 }
@@ -105,51 +112,35 @@ impl eframe::App for PostApp {
                 rt.spawn(async move {
                     let mut state = state.lock().await;
 
+                    let text = state.post_text.clone();
+
+                    // Post to Twitter if authorized
+                    if state.twitter_authorized {
+                        if let Some(bearer_token) = twitter::load_bearer_token() {
+                            if twitter::post_to_twitter(&bearer_token, &text).await {
+                                println!("Posted to Twitter successfully!");
+                            } else {
+                                println!("Failed to post to Twitter.");
+                            }
+                        }
+                    }
+
+                    // Post to Bluesky if authorized
                     if let Some(token) = &state.bluesky_token {
                         if let Some(user_did) = &state.did {
-                            let text = state.post_text.clone();
                             let token = token.clone();
                             let user_did = user_did.clone();
 
-                            let final_token = if !is_token_valid(&token) {
-                                if let Some(refresh_token) = &state.bluesky_token {
-                                    let new_token = {
-                                        if let Some(new_token) =
-                                            bluesky::refresh_access_token(refresh_token).await
-                                        {
-                                            bluesky::save_tokens(
-                                                &new_token,
-                                                refresh_token,
-                                                &user_did,
-                                            );
-                                            new_token
-                                        } else {
-                                            println!("Failed to refresh token");
-                                            return;
-                                        }
-                                    };
-                                    state.bluesky_token = Some(new_token.clone());
-                                    new_token
-                                } else {
-                                    println!("No refresh token available");
-                                    return;
-                                }
-                            } else {
-                                token
-                            };
-
-                            if bluesky::post_to_bluesky(&final_token, &text, &user_did).await {
-                                println!("Post successful!");
-                                state.post_text.clear();
+                            if bluesky::post_to_bluesky(&token, &text, &user_did).await {
+                                println!("Posted to Bluesky successfully!");
                             } else {
                                 println!("Failed to post to Bluesky.");
                             }
-                        } else {
-                            println!("No DID available for posting.");
                         }
-                    } else {
-                        println!("Not authorized for Bluesky.");
                     }
+
+                    // Clear the input box after posting
+                    state.post_text.clear();
                 });
             }
         });
