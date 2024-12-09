@@ -28,19 +28,19 @@ impl PostApp {
         }
 
         // Load Bearer Token for Twitter
-        if let Some(_bearer_token) = twitter::load_bearer_token() {
+        if twitter::load_bearer_token().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.twitter_authorized = true;
         }
 
         // Load LinkedIn tokens
-        if let Some(_linkedin_token) = linkedin::load_bearer_token() {
+        if linkedin::load_bearer_token().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.linkedin_authorized = true;
         }
 
         // Load Mastodon Access Token
-        if let Some(token_data) = mastodon::load_tokens() {
+        if mastodon::load_tokens().is_some() {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.mastodon_authorized = true;
         }
@@ -57,183 +57,188 @@ impl eframe::App for PostApp {
         let state_clone = Arc::clone(&self.state);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Multique");
+            ui.heading("🌟 Multique - Multi-Platform Poster");
 
-            // Twitter Authorization UI
-            ui.horizontal(|ui| {
-                ui.label("Twitter / X:");
-                let state = futures::executor::block_on(state_clone.lock());
-                if state.twitter_authorized {
-                    ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    let rt = Arc::clone(&self.rt);
-                    let state_clone = Arc::clone(&self.state);
-                    rt.spawn(async move {
-                        if let Some(auth_url) = twitter::generate_auth_url().await {
-                            println!("Authorize your app at: {}", auth_url);
+            // Platform Authorization Section
+            ui.group(|ui| {
+                ui.label("Platform Authorizations:");
+
+                // Twitter Authorization
+                ui.horizontal(|ui| {
+                    ui.label("🐦 Twitter / X:");
+                    let state = futures::executor::block_on(state_clone.lock());
+                    if state.twitter_authorized {
+                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
+                    } else if ui.button("Authorize").clicked() {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if let Some(auth_url) = twitter::generate_auth_url().await {
+                                println!("Authorize your app at: {}", auth_url);
+
+                                println!("Enter the authorization code:");
+                                let mut input_code = String::new();
+                                std::io::stdin().read_line(&mut input_code).unwrap();
+                                let code = input_code.trim().to_string();
+
+                                if twitter::authorize_twitter(state_clone.clone(), &code).await.is_some() {
+                                    let mut state = state_clone.lock().await;
+                                    state.twitter_authorized = true;
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // Bluesky Authorization
+                ui.horizontal(|ui| {
+                    ui.label("☁️ Bluesky:");
+                    let state = futures::executor::block_on(state_clone.lock());
+                    if state.bluesky_authorized {
+                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
+                    } else if ui.button("Authorize").clicked() {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if bluesky::authorize_bluesky(state_clone.clone()).await.is_some() {
+                                let mut state = state_clone.lock().await;
+                                state.bluesky_authorized = true;
+                            }
+                        });
+                    }
+                });
+
+                // Mastodon Authorization
+                ui.horizontal(|ui| {
+                    ui.label("🐘 Mastodon:");
+                    let state = futures::executor::block_on(state_clone.lock());
+                    if state.mastodon_authorized {
+                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
+                    } else if ui.button("Authorize").clicked() {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            let client_id =
+                                std::env::var("MASTODON_CLIENT_ID").expect("MASTODON_CLIENT_ID not set in .env");
+                            let client_secret = std::env::var("MASTODON_CLIENT_SECRET")
+                                .expect("MASTODON_CLIENT_SECRET not set in .env");
+
+                            let authorization_url = mastodon::generate_auth_url(&client_id).await;
+                            println!("Authorize your app at: {}", authorization_url);
 
                             println!("Enter the authorization code:");
                             let mut input_code = String::new();
                             std::io::stdin().read_line(&mut input_code).unwrap();
                             let code = input_code.trim().to_string();
 
-                            if twitter::authorize_twitter(state_clone.clone(), &code).await.is_some() {
+                            if let Some(access_token) =
+                                mastodon::authorize_mastodon(&client_id, &client_secret, &code).await
+                            {
+                                mastodon::save_tokens(&access_token);
                                 let mut state = state_clone.lock().await;
-                                state.twitter_authorized = true;
+                                state.mastodon_authorized = true;
                             }
-                        }
-                    });
-                }
-            });
+                        });
+                    }
+                });
 
-            // Bluesky Authorization UI
-            ui.horizontal(|ui| {
-                ui.label("Bluesky:");
-                let state = futures::executor::block_on(state_clone.lock());
-                if state.bluesky_authorized {
-                    ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    let rt = Arc::clone(&self.rt);
-                    let state_clone = Arc::clone(&self.state);
-                    rt.spawn(async move {
-                        if bluesky::authorize_bluesky(state_clone.clone()).await.is_some() {
-                            let mut state = state_clone.lock().await;
-                            state.bluesky_authorized = true;
-                        }
-                    });
-                }
-            });
+                // LinkedIn Authorization
+                ui.horizontal(|ui| {
+                    ui.label("🔗 LinkedIn:");
+                    let state = futures::executor::block_on(state_clone.lock());
+                    if state.linkedin_authorized {
+                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
+                    } else if ui.button("Authorize").clicked() {
+                        let rt = Arc::clone(&self.rt);
+                        let state_clone = Arc::clone(&self.state);
+                        rt.spawn(async move {
+                            if let Some(auth_url) = linkedin::generate_auth_url().await {
+                                println!("Authorize your app at: {}", auth_url);
 
-            // LinkedIn Authorization UI
-            ui.horizontal(|ui| {
-                ui.label("LinkedIn:");
-                let state = futures::executor::block_on(state_clone.lock());
-                if state.linkedin_authorized {
-                    ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    let rt = Arc::clone(&self.rt);
-                    let state_clone = Arc::clone(&self.state);
-                    rt.spawn(async move {
-                        if let Some(auth_url) = linkedin::generate_auth_url().await {
-                            println!("Authorize your app at: {}", auth_url);
+                                println!("Enter the authorization code:");
+                                let mut input_code = String::new();
+                                std::io::stdin().read_line(&mut input_code).unwrap();
+                                let code = input_code.trim().to_string();
 
-                            println!("Enter the authorization code:");
-                            let mut input_code = String::new();
-                            std::io::stdin().read_line(&mut input_code).unwrap();
-                            let code = input_code.trim().to_string();
-
-                            if linkedin::authorize_linkedin(state_clone.clone(), &code).await.is_some() {
-                                let mut state = state_clone.lock().await;
-                                state.linkedin_authorized = true;
+                                if linkedin::authorize_linkedin(state_clone.clone(), &code).await.is_some() {
+                                    let mut state = state_clone.lock().await;
+                                    state.linkedin_authorized = true;
+                                }
                             }
-                        }
-                    });
-                }
-            });
-
-            // Mastodon Authorization UI
-            ui.horizontal(|ui| {
-                ui.label("Mastodon:");
-                let state = futures::executor::block_on(state_clone.lock());
-                if state.mastodon_authorized {
-                    ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    let rt = Arc::clone(&self.rt);
-                    let state_clone = Arc::clone(&self.state);
-                    rt.spawn(async move {
-                        let client_id =
-                            std::env::var("MASTODON_CLIENT_ID").expect("MASTODON_CLIENT_ID not set in .env");
-                        let client_secret =
-                            std::env::var("MASTODON_CLIENT_SECRET").expect("MASTODON_CLIENT_SECRET not set in .env");
-
-                        let authorization_url = mastodon::generate_auth_url(&client_id).await;
-                        println!("Authorize your app at: {}", authorization_url);
-
-                        println!("Enter the authorization code:");
-                        let mut input_code = String::new();
-                        std::io::stdin().read_line(&mut input_code).unwrap();
-                        let code = input_code.trim().to_string();
-
-                        if let Some(access_token) =
-                            mastodon::authorize_mastodon(&client_id, &client_secret, &code).await
-                        {
-                            mastodon::save_tokens(&access_token);
-                            let mut state = state_clone.lock().await;
-                            state.mastodon_authorized = true;
-                        }
-                    });
-                }
+                        });
+                    }
+                });
             });
 
             ui.separator();
 
-            // Post Input UI
-            {
-                let mut state = futures::executor::block_on(state_clone.lock());
-                ui.text_edit_multiline(&mut state.post_text);
-            }
+            // Compose and Post Section
+            ui.group(|ui| {
+                ui.label("Compose your message:");
+                {
+                    let mut state = futures::executor::block_on(state_clone.lock());
+                    ui.text_edit_multiline(&mut state.post_text);
+                }
 
-            // Post Button
-            if ui.button("Post").clicked() {
-                let state = Arc::clone(&self.state);
-                let rt = Arc::clone(&self.rt);
+                if ui
+                    .add(egui::Button::new("📤 Post").fill(egui::Color32::DARK_GRAY))
+                    .clicked()
+                {
+                    let state = Arc::clone(&self.state);
+                    let rt = Arc::clone(&self.rt);
 
-                rt.spawn(async move {
-                    let mut state = state.lock().await;
+                    rt.spawn(async move {
+                        let mut state = state.lock().await;
+                        let text = state.post_text.clone();
 
-                    let text = state.post_text.clone();
-
-                    // Post to Twitter if authorized
-                    if state.twitter_authorized {
-                        if let Some(bearer_token) = twitter::load_bearer_token() {
-                            if twitter::post_to_twitter(&bearer_token, &text).await {
-                                println!("Posted to Twitter successfully!");
-                            } else {
-                                println!("Failed to post to Twitter.");
+                        // Post to Twitter
+                        if state.twitter_authorized {
+                            if let Some(bearer_token) = twitter::load_bearer_token() {
+                                if twitter::post_to_twitter(&bearer_token, &text).await {
+                                    println!("Posted to Twitter successfully!");
+                                } else {
+                                    println!("Failed to post to Twitter.");
+                                }
                             }
                         }
-                    }
 
-                    // Post to Bluesky if authorized
-                    if let Some(token) = &state.bluesky_token {
-                        if let Some(user_did) = &state.did {
-                            let token = token.clone();
-                            let user_did = user_did.clone();
-
-                            if bluesky::post_to_bluesky(&token, &text, &user_did).await {
-                                println!("Posted to Bluesky successfully!");
-                            } else {
-                                println!("Failed to post to Bluesky.");
+                        // Post to Bluesky
+                        if let Some(token) = &state.bluesky_token {
+                            if let Some(user_did) = &state.did {
+                                if bluesky::post_to_bluesky(token, &text, user_did).await {
+                                    println!("Posted to Bluesky successfully!");
+                                } else {
+                                    println!("Failed to post to Bluesky.");
+                                }
                             }
                         }
-                    }
 
-                    // Post to LinkedIn if authorized
-                    if state.linkedin_authorized {
-                        if let Some(linkedin_token) = linkedin::load_bearer_token() {
-                            if linkedin::post_to_linkedin(&linkedin_token, &text).await {
-                                println!("Posted to LinkedIn successfully!");
-                            } else {
-                                println!("Failed to post to LinkedIn.");
+                        // Post to Mastodon
+                        if state.mastodon_authorized {
+                            if let Some(token_data) = mastodon::load_tokens() {
+                                if mastodon::post_to_mastodon(&token_data.access_token, &text).await {
+                                    println!("Posted to Mastodon successfully!");
+                                } else {
+                                    println!("Failed to post to Mastodon.");
+                                }
                             }
                         }
-                    }
 
-                    // Post to Mastodon if authorized
-                    if state.mastodon_authorized {
-                        if let Some(token_data) = mastodon::load_tokens() {
-                            if mastodon::post_to_mastodon(&token_data.access_token, &text).await {
-                                println!("Posted to Mastodon successfully!");
-                            } else {
-                                println!("Failed to post to Mastodon.");
+                        // Post to LinkedIn
+                        if state.linkedin_authorized {
+                            if let Some(linkedin_token) = linkedin::load_bearer_token() {
+                                if linkedin::post_to_linkedin(&linkedin_token, &text).await {
+                                    println!("Posted to LinkedIn successfully!");
+                                } else {
+                                    println!("Failed to post to LinkedIn.");
+                                }
                             }
                         }
-                    }
 
-                    // Clear the input box after posting
-                    state.post_text.clear();
-                });
-            }
+                        state.post_text.clear(); // Clear input after posting
+                    });
+                }
+            });
         });
     }
 }
