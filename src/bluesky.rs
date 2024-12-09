@@ -89,42 +89,53 @@ pub async fn authorize_bluesky(state: Arc<Mutex<posts::AppState>>) -> Option<Tok
     let auth_data = create_auth_request();
 
     match send_auth_request(&client, &auth_data).await {
+        Ok(response) if response.status().is_success() => process_auth_success(response, state).await,
         Ok(response) => {
-            if response.status().is_success() {
-                if let Ok(auth_response) = response.json::<BlueskyAuthResponse>().await {
-                    save_tokens(
-                        &auth_response.access_jwt,
-                        &auth_response.refresh_jwt,
-                        &auth_response.did,
-                    );
-
-                    // Update app state with new tokens
-                    {
-                        let mut state = state.lock().await;
-                        state.bluesky_token = Some(auth_response.access_jwt.clone());
-                        state.did = Some(auth_response.did.clone());
-                        state.bluesky_authorized = true;
-                    }
-
-                    Some(TokenData {
-                        access_jwt: auth_response.access_jwt,
-                        refresh_jwt: auth_response.refresh_jwt,
-                        did: auth_response.did,
-                    })
-                } else {
-                    println!("Failed to parse authorization response.");
-                    None
-                }
-            } else {
-                println!("Authorization failed: {:?}", response.text().await);
-                None
-            }
+            log_auth_error("Authorization failed", response).await;
+            None
         }
         Err(err) => {
             println!("Error during authorization: {:?}", err);
             None
         }
     }
+}
+
+async fn process_auth_success(response: reqwest::Response, state: Arc<Mutex<posts::AppState>>) -> Option<TokenData> {
+    if let Ok(auth_response) = response.json::<BlueskyAuthResponse>().await {
+        save_tokens(
+            &auth_response.access_jwt,
+            &auth_response.refresh_jwt,
+            &auth_response.did,
+        );
+
+        update_app_state(&state, &auth_response).await;
+
+        Some(TokenData {
+            access_jwt: auth_response.access_jwt,
+            refresh_jwt: auth_response.refresh_jwt,
+            did: auth_response.did,
+        })
+    } else {
+        println!("Failed to parse authorization response.");
+        None
+    }
+}
+
+async fn update_app_state(state: &Arc<Mutex<posts::AppState>>, auth_response: &BlueskyAuthResponse) {
+    let mut state = state.lock().await;
+    state.bluesky_token = Some(auth_response.access_jwt.clone());
+    state.did = Some(auth_response.did.clone());
+    state.bluesky_authorized = true;
+}
+
+async fn log_auth_error(context: &str, response: reqwest::Response) {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<Failed to read body>".to_string());
+    println!("{}: Status: {}, Body: {}", context, status, body);
 }
 
 pub async fn reauthorize_bluesky() -> Option<TokenData> {
@@ -163,86 +174,89 @@ pub async fn reauthorize_bluesky() -> Option<TokenData> {
 }
 
 pub async fn post_to_bluesky(token: &str, text: &str, user_did: &str) -> bool {
-    use chrono::Utc;
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BlueskyPost {
-        repo: String,       // The DID of the user
-        collection: String, // The type of record
-        r#type: String,     // The schema type of the record
-        record: Record,     // The actual content of the post
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Record {
-        text: String,       // The post's text content
-        created_at: String, // ISO 8601 timestamp
-    }
-
     let client = Client::new();
     let mut current_token = token.to_string();
 
     for _ in 0..2 {
-        // Allow up to two attempts: one for token refresh and another for reauthorization.
-        let post_data = BlueskyPost {
-            repo: user_did.to_string(),
-            collection: "app.bsky.feed.post".to_string(),
-            r#type: "app.bsky.feed.post".to_string(),
-            record: Record {
-                text: text.to_string(),
-                created_at: Utc::now().to_rfc3339(), // Generate the current timestamp in ISO 8601 format
-            },
-        };
+        // Attempt to post
+        if try_post(&client, &current_token, text, user_did).await {
+            return true;
+        }
 
-        match client
-            .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
-            .bearer_auth(&current_token)
-            .json(&post_data)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    return true; // Post succeeded
-                } else if response.status() == 401 {
-                    println!("Bluesky token expired. Attempting to refresh or reauthorize...");
-
-                    // Try refreshing the token
-                    if let Some(tokens) = load_tokens() {
-                        if let Some(new_tokens) = refresh_access_token(&tokens.refresh_jwt).await {
-                            current_token = new_tokens.access_jwt;
-                            continue; // Retry with the refreshed token
-                        } else {
-                            println!("Refresh failed. Attempting reauthorization...");
-                            // If refresh fails, attempt reauthorization
-                            if let Some(new_tokens) = reauthorize_bluesky().await {
-                                current_token = new_tokens.access_jwt;
-                                continue; // Retry with the new token
-                            }
-                        }
-                    }
-
-                    println!("Failed to refresh or reauthorize token for Bluesky.");
-                    return false;
-                } else {
-                    println!(
-                        "Post failed with status {}: {:?}",
-                        response.status(),
-                        response.text().await
-                    );
-                    return false;
-                }
-            }
-            Err(err) => {
-                println!("Error posting to Bluesky: {:?}", err);
-                return false;
-            }
+        // If posting fails due to authentication, attempt to refresh or reauthorize
+        if !refresh_or_reauthorize(&mut current_token).await {
+            break;
         }
     }
 
     println!("All attempts to post to Bluesky failed.");
+    false
+}
+
+async fn try_post(client: &Client, token: &str, text: &str, user_did: &str) -> bool {
+    use chrono::Utc;
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Record {
+        text: String,
+        created_at: String,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PostData {
+        repo: String,
+        collection: String,
+        r#type: String,
+        record: Record,
+    }
+
+    let post_data = PostData {
+        repo: user_did.to_string(),
+        collection: "app.bsky.feed.post".to_string(),
+        r#type: "app.bsky.feed.post".to_string(),
+        record: Record {
+            text: text.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        },
+    };
+
+    match client
+        .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
+        .bearer_auth(token)
+        .json(&post_data)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            println!(
+                "Post failed with status {}: {:?}",
+                response.status(),
+                response.text().await
+            );
+            false
+        }
+        Err(err) => {
+            println!("Error posting to Bluesky: {:?}", err);
+            false
+        }
+    }
+}
+
+async fn refresh_or_reauthorize(current_token: &mut String) -> bool {
+    if let Some(tokens) = load_tokens() {
+        if let Some(new_tokens) = refresh_access_token(&tokens.refresh_jwt).await {
+            *current_token = new_tokens.access_jwt;
+            return true;
+        }
+        if let Some(new_tokens) = reauthorize_bluesky().await {
+            *current_token = new_tokens.access_jwt;
+            return true;
+        }
+    }
+    println!("Failed to refresh or reauthorize token.");
     false
 }
 
