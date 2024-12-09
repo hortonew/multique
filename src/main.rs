@@ -25,6 +25,7 @@ impl PostApp {
             let mut state_guard = futures::executor::block_on(state.lock());
             state_guard.bluesky_token = Some(tokens.access_jwt);
             state_guard.did = Some(tokens.did);
+            state_guard.bluesky_authorized = true; // Mark Bluesky as authorized
         }
 
         Self {
@@ -69,16 +70,20 @@ impl eframe::App for PostApp {
                 let mut state = futures::executor::block_on(state_clone.lock());
                 if state.bluesky_authorized {
                     ui.label("Authorized ✅");
-                } else if ui.button("Authorize").clicked() {
-                    let rt = Arc::clone(&self.rt);
-                    let state_clone = Arc::clone(&self.state);
-                    rt.spawn(async move {
-                        if bluesky::authorize_bluesky(state_clone.clone())
-                            .await
-                            .is_some()
-                        {
-                            let mut state = state_clone.lock().await;
-                            state.bluesky_authorized = true;
+                } else {
+                    ui.add_enabled_ui(!state.bluesky_authorized, |ui| {
+                        if ui.button("Authorize").clicked() {
+                            let rt = Arc::clone(&self.rt);
+                            let state_clone = Arc::clone(&self.state);
+                            rt.spawn(async move {
+                                if bluesky::authorize_bluesky(state_clone.clone())
+                                    .await
+                                    .is_some()
+                                {
+                                    let mut state = state_clone.lock().await;
+                                    state.bluesky_authorized = true;
+                                }
+                            });
                         }
                     });
                 }
