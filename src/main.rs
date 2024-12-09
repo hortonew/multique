@@ -1,5 +1,6 @@
 use dotenv::dotenv;
 use eframe::egui;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
@@ -13,12 +14,20 @@ mod twitter;
 struct PostApp {
     state: Arc<Mutex<posts::AppState>>,
     rt: Arc<Runtime>,
+    platform_checkboxes: HashMap<&'static str, bool>, // Added checkboxes state
 }
 
 impl PostApp {
     fn new() -> Self {
         let state = Arc::new(Mutex::new(posts::AppState::default()));
         let rt = Arc::new(Runtime::new().unwrap());
+
+        let platform_checkboxes = HashMap::from([
+            ("Twitter", true),
+            ("Bluesky", true),
+            ("Mastodon", true),
+            ("LinkedIn", false),
+        ]);
 
         // Load Bluesky tokens and validate
         if let Some(tokens) = bluesky::load_tokens() {
@@ -67,7 +76,11 @@ impl PostApp {
             state_guard.mastodon_authorized = true;
         }
 
-        Self { state, rt }
+        Self {
+            state,
+            rt,
+            platform_checkboxes,
+        }
     }
 }
 
@@ -78,115 +91,46 @@ impl eframe::App for PostApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("🌟 Multique - Post to all the platforms!");
 
-            // Platform Authorization Section
+            // Platform Selection Section
             ui.group(|ui| {
                 ui.label("Platforms:");
 
-                // Twitter Authorization
-                ui.horizontal(|ui| {
-                    ui.label("🐦 Twitter / X:");
-                    let state = futures::executor::block_on(state_clone.lock());
-                    if state.twitter_authorized {
-                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
-                    } else if ui.button("Authorize").clicked() {
-                        let rt = Arc::clone(&self.rt);
-                        let state_clone = Arc::clone(&self.state);
-                        rt.spawn(async move {
-                            if let Some(auth_url) = twitter::generate_auth_url().await {
-                                println!("Authorize your app at: {}", auth_url);
+                // Render checkboxes and authorization status for each platform
+                render_platform_checkbox(
+                    ui,
+                    "🐦 Twitter / X:",
+                    "Twitter",
+                    &mut self.platform_checkboxes,
+                    |state| state.twitter_authorized,
+                    state_clone.clone(),
+                );
 
-                                println!("Enter the authorization code:");
-                                let mut input_code = String::new();
-                                std::io::stdin().read_line(&mut input_code).unwrap();
-                                let code = input_code.trim().to_string();
+                render_platform_checkbox(
+                    ui,
+                    "☁️ Bluesky:",
+                    "Bluesky",
+                    &mut self.platform_checkboxes,
+                    |state| state.bluesky_authorized,
+                    state_clone.clone(),
+                );
 
-                                if twitter::authorize_twitter(state_clone.clone(), &code).await.is_some() {
-                                    let mut state = state_clone.lock().await;
-                                    state.twitter_authorized = true;
-                                }
-                            }
-                        });
-                    }
-                });
+                render_platform_checkbox(
+                    ui,
+                    "🐘 Mastodon:",
+                    "Mastodon",
+                    &mut self.platform_checkboxes,
+                    |state| state.mastodon_authorized,
+                    state_clone.clone(),
+                );
 
-                // Bluesky Authorization
-                ui.horizontal(|ui| {
-                    ui.label("☁️ Bluesky:");
-                    let state = futures::executor::block_on(state_clone.lock());
-                    if state.bluesky_authorized {
-                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
-                    } else if ui.button("Authorize").clicked() {
-                        let rt = Arc::clone(&self.rt);
-                        let state_clone = Arc::clone(&self.state);
-                        rt.spawn(async move {
-                            if bluesky::authorize_bluesky(state_clone.clone()).await.is_some() {
-                                let mut state = state_clone.lock().await;
-                                state.bluesky_authorized = true;
-                            }
-                        });
-                    }
-                });
-
-                // Mastodon Authorization
-                ui.horizontal(|ui| {
-                    ui.label("🐘 Mastodon:");
-                    let state = futures::executor::block_on(state_clone.lock());
-                    if state.mastodon_authorized {
-                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
-                    } else if ui.button("Authorize").clicked() {
-                        let rt = Arc::clone(&self.rt);
-                        let state_clone = Arc::clone(&self.state);
-                        rt.spawn(async move {
-                            let client_id =
-                                std::env::var("MASTODON_CLIENT_ID").expect("MASTODON_CLIENT_ID not set in .env");
-                            let client_secret = std::env::var("MASTODON_CLIENT_SECRET")
-                                .expect("MASTODON_CLIENT_SECRET not set in .env");
-
-                            let authorization_url = mastodon::generate_auth_url(&client_id).await;
-                            println!("Authorize your app at: {}", authorization_url);
-
-                            println!("Enter the authorization code:");
-                            let mut input_code = String::new();
-                            std::io::stdin().read_line(&mut input_code).unwrap();
-                            let code = input_code.trim().to_string();
-
-                            if let Some(access_token) =
-                                mastodon::authorize_mastodon(&client_id, &client_secret, &code).await
-                            {
-                                mastodon::save_tokens(&access_token);
-                                let mut state = state_clone.lock().await;
-                                state.mastodon_authorized = true;
-                            }
-                        });
-                    }
-                });
-
-                // LinkedIn Authorization
-                ui.horizontal(|ui| {
-                    ui.label("🔗 LinkedIn:");
-                    let state = futures::executor::block_on(state_clone.lock());
-                    if state.linkedin_authorized {
-                        ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
-                    } else if ui.button("Authorize").clicked() {
-                        let rt = Arc::clone(&self.rt);
-                        let state_clone = Arc::clone(&self.state);
-                        rt.spawn(async move {
-                            if let Some(auth_url) = linkedin::generate_auth_url().await {
-                                println!("Authorize your app at: {}", auth_url);
-
-                                println!("Enter the authorization code:");
-                                let mut input_code = String::new();
-                                std::io::stdin().read_line(&mut input_code).unwrap();
-                                let code = input_code.trim().to_string();
-
-                                if linkedin::authorize_linkedin(state_clone.clone(), &code).await.is_some() {
-                                    let mut state = state_clone.lock().await;
-                                    state.linkedin_authorized = true;
-                                }
-                            }
-                        });
-                    }
-                });
+                render_platform_checkbox(
+                    ui,
+                    "🔗 LinkedIn:",
+                    "LinkedIn",
+                    &mut self.platform_checkboxes,
+                    |state| state.linkedin_authorized,
+                    state_clone.clone(),
+                );
             });
 
             ui.separator();
@@ -205,13 +149,14 @@ impl eframe::App for PostApp {
                 {
                     let state = Arc::clone(&self.state);
                     let rt = Arc::clone(&self.rt);
+                    let selected_platforms = self.platform_checkboxes.clone();
 
                     rt.spawn(async move {
                         let mut state = state.lock().await;
                         let text = state.post_text.clone();
 
-                        // Post to Twitter
-                        if state.twitter_authorized {
+                        // Post only to platforms that are authorized and selected
+                        if *selected_platforms.get("Twitter").unwrap_or(&false) && state.twitter_authorized {
                             if let Some(bearer_token) = twitter::load_bearer_token() {
                                 if twitter::post_to_twitter(&bearer_token, &text).await {
                                     println!("Posted to Twitter successfully!");
@@ -221,65 +166,19 @@ impl eframe::App for PostApp {
                             }
                         }
 
-                        // Post to Bluesky with retries for refresh/reauthorization
-                        if state.bluesky_authorized {
+                        if *selected_platforms.get("Bluesky").unwrap_or(&false) && state.bluesky_authorized {
                             if let Some(token) = state.bluesky_token.clone() {
                                 if let Some(user_did) = state.did.clone() {
                                     if bluesky::post_to_bluesky(&token, &text, &user_did).await {
                                         println!("Posted to Bluesky successfully!");
                                     } else {
-                                        println!("Initial Bluesky post failed. Attempting token refresh...");
-                                        if let Some(tokens) = bluesky::load_tokens() {
-                                            if let Some(new_tokens) =
-                                                bluesky::refresh_access_token(&tokens.refresh_jwt).await
-                                            {
-                                                state.bluesky_token = Some(new_tokens.access_jwt.clone());
-                                                if bluesky::post_to_bluesky(
-                                                    &new_tokens.access_jwt,
-                                                    &text,
-                                                    &new_tokens.did,
-                                                )
-                                                .await
-                                                {
-                                                    println!("Posted to Bluesky successfully after refresh!");
-                                                } else {
-                                                    println!(
-                                                        "Bluesky post failed after token refresh. Attempting reauthorization..."
-                                                    );
-                                                    if let Some(new_tokens) =
-                                                        bluesky::reauthorize_bluesky().await
-                                                    {
-                                                        state.bluesky_token =
-                                                            Some(new_tokens.access_jwt.clone());
-                                                        state.did = Some(new_tokens.did.clone());
-                                                        if bluesky::post_to_bluesky(
-                                                            &new_tokens.access_jwt,
-                                                            &text,
-                                                            &new_tokens.did,
-                                                        )
-                                                        .await
-                                                        {
-                                                            println!(
-                                                                "Posted to Bluesky successfully after reauthorization!"
-                                                            );
-                                                        } else {
-                                                            println!(
-                                                                "Failed to post to Bluesky after reauthorization."
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                println!("Failed to refresh or reauthorize Bluesky.");
-                                            }
-                                        }
+                                        println!("Failed to post to Bluesky.");
                                     }
                                 }
                             }
                         }
 
-                        // Post to Mastodon
-                        if state.mastodon_authorized {
+                        if *selected_platforms.get("Mastodon").unwrap_or(&false) && state.mastodon_authorized {
                             if let Some(token_data) = mastodon::load_tokens() {
                                 if mastodon::post_to_mastodon(&token_data.access_token, &text).await {
                                     println!("Posted to Mastodon successfully!");
@@ -289,8 +188,7 @@ impl eframe::App for PostApp {
                             }
                         }
 
-                        // Post to LinkedIn
-                        if state.linkedin_authorized {
+                        if *selected_platforms.get("LinkedIn").unwrap_or(&false) && state.linkedin_authorized {
                             if let Some(linkedin_token) = linkedin::load_bearer_token() {
                                 if linkedin::post_to_linkedin(&linkedin_token, &text).await {
                                     println!("Posted to LinkedIn successfully!");
@@ -306,6 +204,34 @@ impl eframe::App for PostApp {
             });
         });
     }
+}
+
+/// Helper function to render a platform's checkbox and authorization status
+fn render_platform_checkbox<F>(
+    ui: &mut egui::Ui,
+    label: &str,
+    platform_key: &'static str,
+    platform_checkboxes: &mut HashMap<&'static str, bool>,
+    is_authorized: F,
+    state_clone: Arc<Mutex<posts::AppState>>,
+) where
+    F: FnOnce(&posts::AppState) -> bool,
+{
+    ui.horizontal(|ui| {
+        ui.label(label);
+
+        // Check authorization status
+        let state = futures::executor::block_on(state_clone.lock());
+        if is_authorized(&state) {
+            ui.colored_label(egui::Color32::GREEN, "Authorized ✅");
+            // Show checkbox only if authorized
+            if let Some(checked) = platform_checkboxes.get_mut(platform_key) {
+                ui.checkbox(checked, "");
+            }
+        } else {
+            ui.colored_label(egui::Color32::RED, "Not Authorized ❌");
+        }
+    });
 }
 
 fn main() -> Result<(), eframe::Error> {
