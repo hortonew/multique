@@ -157,7 +157,7 @@ impl eframe::App for PostApp {
 
                 render_platform_checkbox(
                     ui,
-                    "☁️ Bluesky:",
+                    "🐦 Bluesky:",
                     "Bluesky",
                     &mut self.platform_checkboxes,
                     |state| state.bluesky_authorized,
