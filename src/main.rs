@@ -57,11 +57,11 @@ impl eframe::App for PostApp {
         let state_clone = Arc::clone(&self.state);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🌟 Multique - Multi-Platform Poster");
+            ui.heading("🌟 Multique - Post to all the platforms!");
 
             // Platform Authorization Section
             ui.group(|ui| {
-                ui.label("Platform Authorizations:");
+                ui.label("Platforms:");
 
                 // Twitter Authorization
                 ui.horizontal(|ui| {
